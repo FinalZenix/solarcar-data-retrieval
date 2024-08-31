@@ -3,7 +3,7 @@
 # Tested with 1 BMS device: 
 # - Liontron LiFePO4 Speicher: LX48-100 - 48V 100Ah 
 # - BMS: PACE P16S120A-14530-2.01
-#
+
 # import libraries
 import time
 import yaml
