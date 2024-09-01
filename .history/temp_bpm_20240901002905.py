@@ -6,7 +6,6 @@ import serial
 import io
 import sys
 import constants
-import inter_process_comm_module
 import telemetry_module
 import server_module
 import datetime
@@ -25,9 +24,6 @@ handler = logging.StreamHandler()
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 handler.setFormatter(formatter)
 logger.addHandler(handler)
-
-
-stop_threads = False
 
 # read config
 config = {}
@@ -68,41 +64,49 @@ temp_key = ["temp_1", "temp_2", "temp_3", "temp_4", "temp_5", "temp_6"]
 
 # function connects to BMS
 def bms_connect():
-    number_tries = 0
-    while number_tries < 3:
-        try:
-            logger.debug("trying to connect %s" % bms_serial)
-            s = serial.Serial(bms_serial,timeout = 1)
-            logger.info("BMS serial connected")
-            return s, True
-        except IOError as msg:
-            logger.error(f"BMS serial error connecting: %s" % msg)
-            logger.warning(f"Waiting 5 seconds before retrying to connect ... [ Try {number_tries} ]")
-            time.sleep(5) #Waiting 5 seconds
-            number_tries += 1
-
-    raise ConnectionRefusedError
-        
+    try:
+        print("trying to connect %s" % bms_serial)
+        s = serial.Serial(bms_serial,timeout = 1)
+        print("BMS serial connected")
+        return s, True
+    except IOError as msg:
+        print("BMS serial error connecting: %s" % msg)
+        return False, False    
 
 # function sends data to BMS
-def bms_sendData(bms,request=''):
-    try:
-        if len(request) > 0:
-            bms.write(request)
-            time.sleep(0.25)
-            return True
-    except IOError as e:
-        logger.error("BMS serial error: %s" % e)
-        # global bms_connected
-        return False
+def bms_sendData(comms,request=''):
+
+    if connection_type == "Serial":
+
+        try:
+            if len(request) > 0:
+                comms.write(request)
+                time.sleep(0.25)
+                return True
+        except IOError as e:
+            print("BMS serial error: %s" % e)
+            # global bms_connected
+            return False
+
+    else:
+
+        try:
+            if len(request) > 0:
+                comms.send(request)
+                time.sleep(0.25)
+                return True
+        except Exception as e:
+            print("BMS socket error: %s" % e)
+            # global bms_connected
+            return False
 
 # function receives data from BMS
-def bms_get_data(bms):
+def bms_get_data(comms):
     try:
-        inc_data = bms.readline()
+        inc_data = comms.readline()
     except Exception as e:
         # global bms_connected
-        logger.error(f"Error while retrieving data from the BMS {e}")
+        logging.error(f"Error while retrieving data from the BMS {e}")
         return False
     return inc_data
 
@@ -134,8 +138,8 @@ def chksum_calc(data):
 
     except Exception as e:
         if debug_output > 0:
-            logger.error("Error calculating CHKSUM using data: " + data)
-            logger.error("Error details: ", str(e))
+            print("Error calculating CHKSUM using data: " + data)
+            print("Error details: ", str(e))
         return(False)
 
     return(chksum)
@@ -177,8 +181,7 @@ def bms_parse_data(inc_data):
         
         SOI = hex(ord(inc_data[0:1]))
         if SOI != '0x7e':
-            logger.error("Incorrect starting byte for incoming data")
-            return(False, None);
+            return(False,"Incorrect starting byte for incoming data")
 
 
         if debug_output > 1:
@@ -261,7 +264,6 @@ def bms_parse_data(inc_data):
             print("INFO: ", INFO)
             print("CHKSUM: ", CHKSUM)
             #print("EOI: ", hex(inc_data[13+LENID+4]))
-        logger.error("Checksum error")
         return(False,"Checksum error")
 
 def lchksum_calc(lenid):
@@ -298,7 +300,7 @@ def lchksum_calc(lenid):
 
     except:
 
-        logger.error("Error calculating LCHKSUM using LENID: ", lenid)
+        print("Error calculating LCHKSUM using LENID: ", lenid)
         return(False)
 
     return(chksum)
@@ -342,19 +344,17 @@ def bms_request(bms, ver=b"\x32\x35",adr=b"\x30\x31",cid1=b"\x34\x36",cid2=b"\x4
     if debug_output > 2:
         print("-> Outgoing Data: ", request)
     
-    print(f"******BMS : {bms}**********")
-
     # send data to BMS
     if not bms_sendData(bms,request):
         bms_connected = False
-        logger.error("Error, connection to BMS lost")
+        print("Error, connection to BMS lost")
         return(False,"Error, connection to BMS lost")
 
     # receive data from BMS
     inc_data = bms_get_data(bms)
 
     if inc_data == False:
-        logger.error("Error retrieving data from BMS")
+        print("Error retrieving data from BMS")
         return(False,"Error retrieving data from BMS")
 
     if debug_output > 2:
@@ -375,13 +375,13 @@ def bms_getPackNumber(bms):
     try:
         packNumber = int(INFO,16)
     except:
-        logger.error("Error extracting total battery count in pack")
+        print("Error extracting total battery count in pack")
         return(False,"Error extracting total battery count in pack")
 
     return(success,packNumber)
 
 # function requests "software version" from BMS
-def bms_getVersion(bms):
+def bms_getVersion(comms):
 
     global bms_version
 
@@ -404,15 +404,15 @@ def bms_getVersion(bms):
     return(success,bms_version)
 
 # function requests "product information" (serial number) from BMS
-def bms_getSerial(bms):
+def bms_getSerial(comms):
 
     global bms_sn
     global pack_sn
 
     success, INFO = bms_request(bms,cid2=constants.cid2SerialNumber)
 
-    if not success:
-        logger.error("Unexpected error: " + INFO)
+    if success == False:
+        print("Error: " + INFO)
         return(False,INFO, False)
 
     try:
@@ -471,95 +471,75 @@ def bms_getAnalogData(bms,batNumber):
         v_cell = {}
         t_cell = {}
 
-        for pack_index in range(1,packs+1):
+        for p in range(1,packs+1):
 
-            if pack_index > 1:
+            if p > 1:
                 cells_prev = cells
 
             cells = int(inc_data[byte_index:byte_index+2],16)
             telemetry_module.set_telemetry("total_cells", cells) # telemetry
 
             #Possible remove this next test as were now testing for the INFOFLAG at the end
-            if pack_index > 1:
+            if p > 1:
                 if cells != cells_prev:
                     byte_index += 2
                     cells = int(inc_data[byte_index:byte_index+2],16)
                     if cells != cells_prev:
-                        logger.error("Error parsing BMS analog data: Cannot read multiple packs")
+                        print("Error parsing BMS analog data: Cannot read multiple packs")
                         return(False,"Error parsing BMS analog data: Cannot read multiple packs")
             if debug_output > 0:
-                print("Pack " + str(pack_index).zfill(config['zero_pad_number_packs']) + ", Total cells: " + str(cells))
+                print("Pack " + str(p).zfill(config['zero_pad_number_packs']) + ", Total cells: " + str(cells))
             byte_index += 2
             
             cell_min_volt = 0
             cell_max_volt = 0
 
             for i in range(0,cells):
-                v_cell[(pack_index-1,i)] = int(inc_data[byte_index:byte_index+4],16)
-                telemetry_module.set_telemetry(v_cell_key[i], v_cell[(pack_index-1,i)]) # telemetry
+                v_cell[(p-1,i)] = int(inc_data[byte_index:byte_index+4],16)
+                telemetry_module.set_telemetry(v_cell_key[i], v_cell[(p-1,i)]) # telemetry
 
                 #Adding this because otherwise weird stuff happens
                 #added in fork https://github.com/jpgnz/bmspace
-                if v_cell[(pack_index-1, i)] > 5000:
+                if v_cell[(p-1, i)] > 5000:
                     sys.exit("Exiting script because the value is greater than 5000")
 
                 byte_index += 4
                
                 if debug_output > 0:
-                    print("Pack " + str(pack_index).zfill(config['zero_pad_number_packs']) +", V Cell" + str(i+1).zfill(config['zero_pad_number_cells']) + ": " + str(v_cell[(pack_index-1,i)]) + " mV")
+                    print("Pack " + str(p).zfill(config['zero_pad_number_packs']) +", V Cell" + str(i+1).zfill(config['zero_pad_number_cells']) + ": " + str(v_cell[(p-1,i)]) + " mV")
 
                 #Calculate cell max and min volt
                 if i == 0:
-                    cell_min_volt = v_cell[(pack_index-1,i)]
-                    cell_max_volt = v_cell[(pack_index-1,i)]
+                    cell_min_volt = v_cell[(p-1,i)]
+                    cell_max_volt = v_cell[(p-1,i)]
                 else:
-                    if v_cell[(pack_index-1,i)] < cell_min_volt:
-                        cell_min_volt = v_cell[(pack_index-1,i)]
-                    if v_cell[(pack_index-1,i)] > cell_max_volt:
-                        cell_max_volt = v_cell[(pack_index-1,i)]
+                    if v_cell[(p-1,i)] < cell_min_volt:
+                        cell_min_volt = v_cell[(p-1,i)]
+                    if v_cell[(p-1,i)] > cell_max_volt:
+                        cell_max_volt = v_cell[(p-1,i)]
             
             #Calculate cells max diff volt
             cell_max_diff_volt = cell_max_volt - cell_min_volt
-            # Data for the telemetry
-            telemetry_module.set_telemetry("cell_max_volt", cell_max_volt)
-            telemetry_module.set_telemetry("cell_min_volt", cell_min_volt)
-            # Data for the GUI (instrumentation_gui.py)
-            inter_process_comm_module.set_bms_gui_data("cell_max_volt", cell_max_volt) 
-            inter_process_comm_module.set_bms_gui_data("cell_min_volt", cell_min_volt)
+            telemetry_module.set_telemetry("cell_max_diff_volt", cell_max_diff_volt) # telemetry
             
             if debug_output > 0:
-                print("Pack " + str(pack_index).zfill(config['zero_pad_number_packs']) +", Cell Max Diff Volt Calc: " + str(cell_max_diff_volt) + " mV")
+                print("Pack " + str(p).zfill(config['zero_pad_number_packs']) +", Cell Max Diff Volt Calc: " + str(cell_max_diff_volt) + " mV")
 
             temps = int(inc_data[byte_index:byte_index + 2],16)
-            telemetry_module.set_telemetry("total_temps", temps) # Data for the telemetry
+            telemetry_module.set_telemetry("total_temps", temps) # telemetry
 
             if debug_output > 0:
-                print("Pack " + str(pack_index).zfill(config['zero_pad_number_packs']) + ", Total temperature sensors: " + str(temps))
+                print("Pack " + str(p).zfill(config['zero_pad_number_packs']) + ", Total temperature sensors: " + str(temps))
             byte_index += 2
 
             for i in range(0,temps): #temps-2
-                t_cell[(pack_index-1,i)] = (int(inc_data[byte_index:byte_index + 4],16)-2730)/10
-                telemetry_module.set_telemetry(temp_key[i], t_cell[(pack_index-1,i)]) # Data for the telemetry of the temp_5 and temp_6
+                t_cell[(p-1,i)] = (int(inc_data[byte_index:byte_index + 4],16)-2730)/10
+                telemetry_module.set_telemetry(temp_key[i], t_cell[(p-1,i)]) # telemetry
                 
                 byte_index += 4
                 if debug_output > 0:
-                    print("Pack " + str(pack_index).zfill(config['zero_pad_number_packs']) + ", Temp" + str(i+1) + ": " + str(round(t_cell[(pack_index-1,i)],1)) + " °C")
+                    print("Pack " + str(p).zfill(config['zero_pad_number_packs']) + ", Temp" + str(i+1) + ": " + str(round(t_cell[(p-1,i)],1)) + " °C")
 
-            #Calculate "cell_max_temp", "cell_min_temp" of temp_1 .. temp_4
-            cell_min_temp = t_cell[(pack_index-1, 0)]
-            cell_max_temp = t_cell[(pack_index-1, 0)]
-            for i in range(1,4):                
-                if t_cell[(pack_index-1,i)] < cell_min_temp:
-                    cell_min_temp = t_cell[(pack_index-1,i)]
-                if t_cell[(pack_index-1,i)] > cell_max_temp:
-                    cell_max_temp = t_cell[(pack_index-1,i)]
-            # Data for the telemetry of the cell_max_temp and cell_min_temp  
-            telemetry_module.set_telemetry("cell_max_temp", cell_max_temp) 
-            telemetry_module.set_telemetry("cell_min_temp", cell_min_temp)
-            # Data for the visualisation of the cell_max_temp and cell_min_temp 
-            inter_process_comm_module.set_bms_gui_data("cell_max_temp", cell_max_temp) 
-            inter_process_comm_module.set_bms_gui_data("cell_min_temp", cell_min_temp) 
- 
             # t_mos= (int(inc_data[byte_index:byte_index+4],16))/160-273
             # # client.publish(config['mqtt_base_topic'] + "/t_mos",str(round(t_mos,1)))
             # if print_initial:
@@ -573,83 +553,83 @@ def bms_getAnalogData(bms,batNumber):
 
             i_pack.append(int(inc_data[byte_index:byte_index+4],16))
             byte_index += 4
-            if i_pack[pack_index-1] >= 32768:
-                i_pack[pack_index-1] = -1*(65535 - i_pack[pack_index-1]) #set i_pack at that index to the negative of the complementary
-            i_pack[pack_index-1] = i_pack[pack_index-1]/100
-            telemetry_module.set_telemetry("i_pack", i_pack[pack_index-1]) # Data for the telemetry of the i_pack
+            if i_pack[p-1] >= 32768:
+                i_pack[p-1] = -1*(65535 - i_pack[p-1])
+            i_pack[p-1] = i_pack[p-1]/100
+            telemetry_module.set_telemetry("i_pack", i_pack[p-1]) # telemetry
 
             if debug_output > 0:
-                print("Pack " + str(pack_index).zfill(config['zero_pad_number_packs']) + ", I Pack: " + str(i_pack[pack_index-1]) + " A")
+                print("Pack " + str(p).zfill(config['zero_pad_number_packs']) + ", I Pack: " + str(i_pack[p-1]) + " A")
 
             v_pack.append(int(inc_data[byte_index:byte_index+4],16)/1000)
-            telemetry_module.set_telemetry("v_pack", v_pack[pack_index-1]) # Data for the telemetry of the v_pack
+            telemetry_module.set_telemetry("v_pack", v_pack[p-1]) # telemetry
             byte_index += 4
 
             if debug_output > 0:
-                print("Pack " + str(pack_index).zfill(config['zero_pad_number_packs']) + ", V Pack: " + str(v_pack[pack_index-1]) + " V")
+                print("Pack " + str(p).zfill(config['zero_pad_number_packs']) + ", V Pack: " + str(v_pack[p-1]) + " V")
 
             i_remain_cap.append(int(inc_data[byte_index:byte_index+4],16)*10)
-            telemetry_module.set_telemetry("i_remaining_capacity", i_remain_cap[pack_index-1]) # Data for the telemetry of the i_remaining_capacity
+            telemetry_module.set_telemetry("i_remaining_capacity", i_remain_cap[p-1]) # telemetry
             byte_index += 4
 
             if debug_output > 0:
-                print("Pack " + str(pack_index).zfill(config['zero_pad_number_packs']) + ", I Remaining Capacity: " + str(i_remain_cap[pack_index-1]) + " mAh")
+                print("Pack " + str(p).zfill(config['zero_pad_number_packs']) + ", I Remaining Capacity: " + str(i_remain_cap[p-1]) + " mAh")
 
             byte_index += 2 # Manual: Define number P = 3
 
             i_full_cap.append(int(inc_data[byte_index:byte_index+4],16)*10)
-            telemetry_module.set_telemetry("i_full_capacity", i_full_cap[pack_index-1]) # Data for the telemetry of the i_full_pack
+            telemetry_module.set_telemetry("i_full_capacity", i_full_cap[p-1]) # telemetry
             byte_index += 4
 
             if debug_output > 0:
-                print("Pack " + str(pack_index).zfill(config['zero_pad_number_packs']) + ", I Full Capacity: " + str(i_full_cap[pack_index-1]) + " mAh")
+                print("Pack " + str(p).zfill(config['zero_pad_number_packs']) + ", I Full Capacity: " + str(i_full_cap[p-1]) + " mAh")
 
             try:
-                soc.append(round(i_remain_cap[pack_index-1]/i_full_cap[pack_index-1]*100,2))
-                telemetry_module.set_telemetry("soc", soc[pack_index-1]) # Data for the telemetry of the soc
+                soc.append(round(i_remain_cap[p-1]/i_full_cap[p-1]*100,2))
+                telemetry_module.set_telemetry("soc", soc[p-1]) # telemetry
                 if debug_output > 0:
-                    print("Pack " + str(pack_index).zfill(config['zero_pad_number_packs']) + ", SOC: " + str(soc[pack_index-1]) + " %")
+                    print("Pack " + str(p).zfill(config['zero_pad_number_packs']) + ", SOC: " + str(soc[p-1]) + " %")
             except Exception as e:
-                logger.error("Error parsing BMS analog data, missing pack"  + str(pack_index).zfill(config['zero_pad_number_packs']) + " full capacity: ", str(e))
+                print("Error parsing BMS analog data, missing pack"  + str(p).zfill(config['zero_pad_number_packs']) + " full capacity: ", str(e))
 
             cycles.append(int(inc_data[byte_index:byte_index+4],16))
-            telemetry_module.set_telemetry("cycles", cycles[pack_index-1]) # Data for the telemetry of the cycles
+            telemetry_module.set_telemetry("cycles", cycles[p-1]) # telemetry
             byte_index += 4
 
             if debug_output > 0:
-                print("Pack " + str(pack_index).zfill(config['zero_pad_number_packs']) + ", Cycles: " + str(cycles[pack_index-1]))
+                print("Pack " + str(p).zfill(config['zero_pad_number_packs']) + ", Cycles: " + str(cycles[p-1]))
 
             i_design_cap.append(int(inc_data[byte_index:byte_index+4],16)*10)
-            telemetry_module.set_telemetry("i_design_capacity", i_design_cap[pack_index-1]) # Data for the telemetry of the i_design_capacity
+            telemetry_module.set_telemetry("i_design_capacity", i_design_cap[p-1]) # telemetry
             byte_index += 4
 
             if debug_output > 0:
-                print("Pack " + str(pack_index).zfill(config['zero_pad_number_packs']) + ", Design Capacity: " + str(i_design_cap[pack_index-1]) + " mAh")
+                print("Pack " + str(p).zfill(config['zero_pad_number_packs']) + ", Design Capacity: " + str(i_design_cap[p-1]) + " mAh")
 
             try:
-                soh.append(round(i_full_cap[pack_index-1]/i_design_cap[pack_index-1]*100,2))
-                telemetry_module.set_telemetry("soh", soh[pack_index-1]) # Data for the telemetry of the soh
+                soh.append(round(i_full_cap[p-1]/i_design_cap[p-1]*100,2))
+                telemetry_module.set_telemetry("soh", soh[p-1]) # telemetry
 
                 if debug_output > 0:
-                    print("Pack " + str(pack_index).zfill(config['zero_pad_number_packs']) + ", SOH: " + str(soh[pack_index-1]) + " %")
+                    print("Pack " + str(p).zfill(config['zero_pad_number_packs']) + ", SOH: " + str(soh[p-1]) + " %")
             except Exception as e:
-                logger.error("Error parsing BMS analog data, missing pack"  + str(pack_index).zfill(config['zero_pad_number_packs']) + " design capacity: ", str(e))
+                print("Error parsing BMS analog data, missing pack"  + str(p).zfill(config['zero_pad_number_packs']) + " design capacity: ", str(e))
 
             #byte_index += 2
 
             byte_index += int(config['force_pack_offset'])
 
             #Test for non signed value (matching cell count), to skip possible INFOFLAG present in data
-            if pack_index < packs: #Test - Is there more packs to read?
+            if p < packs: #Test - Is there more packs to read?
                 while (byte_index < len(inc_data)) and (cells != int(inc_data[byte_index:byte_index+2],16)):
                     byte_index += 2
                     if byte_index > len(inc_data):
-                        logger.error("Error parsing BMS analog data: Cannot read multiple packs")
+                        print("Error parsing BMS analog data: Cannot read multiple packs")
                         return(False,"Error parsing BMS analog data: Cannot read multiple packs")
 
 
     except Exception as e:
-        logger.error("Error parsing BMS analog data: ", str(e))
+        print("Error parsing BMS analog data: ", str(e))
         return(False,"Error parsing BMS analog data: " + str(e))
 
     return True,True
@@ -694,7 +674,7 @@ def bms_getPackCapacity(bms):
             print("Pack SOH: " + str(pack_soh) + " %")
 
     except Exception as e:
-        logger.error("Error parsing BMS pack capacity data: ", str(e))
+        print("Error parsing BMS pack capacity data: ", str(e))
         return False, "Error parsing BMS pack capacity data: " + str(e)
 
     return True,True
@@ -811,15 +791,18 @@ def bms_getWarnInfo(bms):
     #inc_data = b'0001100000000000000000000000000000000006000000000000000000000000000000000002' # Warning State 2: Above discharge temp warn
     #inc_data = b'0001100000000000000000000000000000000006000000000000000000000000000000000001' # Warning State 2: Above charge temp warn
     #inc_data = b'00011000000000000000000000000000000000060000000000000000000000000000000000FF' # Warning State 2: multiple warnings
+    if alive:
+        inc_data = b'0001100000000000000000000000000000F000060000020000000000F0100820042000008040' # Warnings from 10 sources
+
     try:
 
         packsW = int(inc_data[byte_index:byte_index+2],16)
-        telemetry_module.set_telemetry("warning_info_packs", packsW) # Data for telemetry of the info of the packs.(warning_info_packs)
+        telemetry_module.set_telemetry("warning_info_packs", packsW) # telemetry
         if debug_output > 0:
             print("Packs for warnings: " + str(packsW))
         byte_index += 2
 
-        for pack_index in range(1,packs+1):
+        for p in range(1,packs+1):
 
             cellsW = int(inc_data[byte_index:byte_index+2],16)
             byte_index += 2
@@ -891,23 +874,21 @@ def bms_getWarnInfo(bms):
             # "instruction state" shall be printed separately
             # added in fork https://github.com/jpgnz/bmspace
             instructionState = ord(bytes.fromhex(inc_data[byte_index:byte_index+2].decode('ascii')))
-
-            #Data for telemetry
-            telemetry_module.set_telemetry("current_limit", instructionState>>0 & 1) 
-            telemetry_module.set_telemetry("charge_fet", instructionState>>1 & 1) 
-            telemetry_module.set_telemetry("discharge_fet", instructionState>>2 & 1) 
-            telemetry_module.set_telemetry("pack_indicate", instructionState>>3 & 1) 
-            telemetry_module.set_telemetry("reverse", instructionState>>4 & 1) 
-            telemetry_module.set_telemetry("ac_in", instructionState>>5 & 1) 
-            telemetry_module.set_telemetry("heart", instructionState>>7 & 1) 
+            telemetry_module.set_telemetry("current_limit", instructionState>>0 & 1) # telemetry
+            telemetry_module.set_telemetry("charge_fet", instructionState>>1 & 1) # telemetry
+            telemetry_module.set_telemetry("discharge_fet", instructionState>>2 & 1) # telemetry
+            telemetry_module.set_telemetry("pack_indicate", instructionState>>3 & 1) # telemetry
+            telemetry_module.set_telemetry("reverse", instructionState>>4 & 1) # telemetry
+            telemetry_module.set_telemetry("ac_in", instructionState>>5 & 1) # telemetry
+            telemetry_module.set_telemetry("heart", instructionState>>7 & 1) # telemetry
             if debug_output > 0:
-                print("Pack " + str(pack_index).zfill(config['zero_pad_number_packs']) + ", current_limit: " + str(instructionState>>0 & 1))
-                print("Pack " + str(pack_index).zfill(config['zero_pad_number_packs']) + ", charge_fet: " + str(instructionState>>1 & 1))
-                print("Pack " + str(pack_index).zfill(config['zero_pad_number_packs']) + ", discharge_fet: " + str(instructionState>>2 & 1))
-                print("Pack " + str(pack_index).zfill(config['zero_pad_number_packs']) + ", pack_indicate: " + str(instructionState>>3 & 1))
-                print("Pack " + str(pack_index).zfill(config['zero_pad_number_packs']) + ", reverse: " + str(instructionState>>4 & 1))
-                print("Pack " + str(pack_index).zfill(config['zero_pad_number_packs']) + ", ac_in: " + str(instructionState>>5 & 1))
-                print("Pack " + str(pack_index).zfill(config['zero_pad_number_packs']) + ", heart: " + str(instructionState>>7 & 1))
+                print("Pack " + str(p).zfill(config['zero_pad_number_packs']) + ", current_limit: " + str(instructionState>>0 & 1))
+                print("Pack " + str(p).zfill(config['zero_pad_number_packs']) + ", charge_fet: " + str(instructionState>>1 & 1))
+                print("Pack " + str(p).zfill(config['zero_pad_number_packs']) + ", discharge_fet: " + str(instructionState>>2 & 1))
+                print("Pack " + str(p).zfill(config['zero_pad_number_packs']) + ", pack_indicate: " + str(instructionState>>3 & 1))
+                print("Pack " + str(p).zfill(config['zero_pad_number_packs']) + ", reverse: " + str(instructionState>>4 & 1))
+                print("Pack " + str(p).zfill(config['zero_pad_number_packs']) + ", ac_in: " + str(instructionState>>5 & 1))
+                print("Pack " + str(p).zfill(config['zero_pad_number_packs']) + ", heart: " + str(instructionState>>7 & 1))
             byte_index += 2
 
 
@@ -959,13 +940,9 @@ def bms_getWarnInfo(bms):
 
             warnings = warnings.rstrip(", ")
 
-            telemetry_module.set_telemetry("warning_string", warnings) # Data for telemetry of any warnings (warning_string)
-            if warnings == "":
-                inter_process_comm_module.set_bms_gui_data("warning_string", "       ") # instrumentation gui
-            else:
-                inter_process_comm_module.set_bms_gui_data("warning_string", "Warning") # instrumentation gui
-            telemetry_module.set_telemetry("balancing_1", balanceState1) # Data for telemetry of balance_1
-            telemetry_module.set_telemetry("balancing_2", balanceState1) # Data for telemetry of balance_2
+            telemetry_module.set_telemetry("warning_string", warnings) # telemetry
+            telemetry_module.set_telemetry("balancing_1", balanceState1) # telemetry
+            telemetry_module.set_telemetry("balancing_2", balanceState1) # telemetry
             if debug_output > 0:
                 print("Pack " + str(p).zfill(config['zero_pad_number_packs']) + ", warnings: " + warnings)
                 print("Pack " + str(p).zfill(config['zero_pad_number_packs']) + ", balancing1: " + balanceState1)
@@ -978,7 +955,7 @@ def bms_getWarnInfo(bms):
                 byte_index += 2
 
     except Exception as e:
-        logger.error("Error parsing BMS warning data: ", str(e))
+        print("Error parsing BMS warning data: ", str(e))
         return False, "Error parsing BMS warning data: " + str(e)
 
     return True,True
@@ -992,31 +969,13 @@ def random_data_debug():
 
     return (True, "***DebugMode***");
 '''
+
 # Function for BMS data collection
 def bms_data_collection():
-    global bms_connected, alive, stop_threads
+    global bms_connected, alive
+    bms, bms_connected = bms_connect(config['bms_ip'], config['bms_port'])
 
-    logger.info("Connecting to BMS...")
-    try:
-        bms, bms_connected = bms_connect()
-    except ConnectionRefusedError:
-        logger.error("Connection to BMS failed. Ending program.")
-        stop_threads = True  # Signal to stop all threads
-        return  # Exit the function to stop the thread
-
-    success, data = bms_getVersion(bms)
-    if success != True:
-        logger.warning("Error retrieving BMS version number")
-
-    time.sleep(0.1)
-    success, bms_sn, pack_sn = bms_getSerial(bms)
-
-    if success != True:
-        logger.error("Error retrieving BMS and pack serial numbers. Exiting...")
-        stop_threads = True  # Signal to stop all threads
-        return  # Exit the function to stop the thread
-
-    while not stop_threads:  # Check global stop flag
+    while True:
         if bms_connected:
             try:
                 # Collect BMS data
@@ -1025,23 +984,24 @@ def bms_data_collection():
                     logger.error(f"Error retrieving BMS analog data: {data}")
 
                 time.sleep(scan_interval / 3)
-
+                
                 success, data = bms_getPackCapacity(bms)
                 if not success:
                     logger.error(f"Error retrieving BMS pack capacity: {data}")
 
                 time.sleep(scan_interval / 3)
-
+                
                 success, data = bms_getWarnInfo(bms)
                 if not success:
                     logger.error(f"Error retrieving BMS warning info: {data}")
-
+                
                 # Collect Speed data and alive data
-                speed_km_h = inter_process_comm_module.read_speed_km_h()  # read speed_km_h
-                telemetry_module.set_telemetry("speed_km_h", speed_km_h)
-                alive = not alive  # toggle alive variable
-                telemetry_module.set_telemetry("alive", alive)
 
+                # Prepare telemetry data
+                alive = not alive
+                telemetry_module.set_telemetry("alive", alive)
+                
+                #print(f"Telemetry prepared: {telemetry_module.telemetry}")
                 time.sleep(scan_interval / 3)
 
             except Exception as e:
@@ -1051,23 +1011,15 @@ def bms_data_collection():
         else:
             # Attempt to reconnect
             logger.info("BMS disconnected, trying to reconnect...")
-            try:
-                bms, bms_connected = bms_connect(config['bms_ip'], config['bms_port'])
-            except ConnectionRefusedError:
-                logger.error("Reconnection failed. Ending program.")
-                stop_threads = True  # Signal to stop all threads
-                return  # Exit the function to stop the thread
+            bms, bms_connected = bms_connect(config['bms_ip'], config['bms_port'])
             time.sleep(5)
 
 # Function for ThingsBoard server communication
 def tb_communication():
-    global bms_connected, stop_threads
     server_module.TB_server_connect()
 
-    while not stop_threads:  # Check global stop flag
+    while True:
         try:
-            if not bms_connected:
-                continue
             if telemetry_module.telemetry:
                 server_module.send_telemetry(telemetry_module.telemetry)
 
@@ -1083,18 +1035,20 @@ if __name__ == "__main__":
     # Start BMS data collection thread
     bms_thread = threading.Thread(target=bms_data_collection, daemon=True)
     bms_thread.start()
+
     # Start ThingsBoard communication thread
     tb_thread = threading.Thread(target=tb_communication, daemon=True)
     tb_thread.start()
 
     # Keep the main thread alive to listen for interrupts
     try:
-        while not stop_threads:
+        while True:
             time.sleep(1)  # Keep main thread alive
+
     except KeyboardInterrupt:
         logger.info("Program terminated by user.")
-        stop_threads = True  # Signal to stop all threads
     finally:
         server_module.cleanup()  # Ensure the ThingsBoard connection is properly closed
         logger.info("Program ended.")
         print("END: " + datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+

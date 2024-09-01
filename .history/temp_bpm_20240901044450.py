@@ -18,7 +18,7 @@ import threading
 print("START: " + datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
 
 # Set up logging
-logging.basicConfig(filename='logfile.log')
+logging.basicConfig(filename='logs/logfile.log')
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 handler = logging.StreamHandler()

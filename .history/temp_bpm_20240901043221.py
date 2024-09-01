@@ -1066,7 +1066,7 @@ def tb_communication():
 
     while not stop_threads:  # Check global stop flag
         try:
-            if not bms_connected:
+            if bms_connected:
                 continue
             if telemetry_module.telemetry:
                 server_module.send_telemetry(telemetry_module.telemetry)

@@ -26,9 +26,6 @@ formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(messag
 handler.setFormatter(formatter)
 logger.addHandler(handler)
 
-
-stop_threads = False
-
 # read config
 config = {}
 
@@ -68,21 +65,14 @@ temp_key = ["temp_1", "temp_2", "temp_3", "temp_4", "temp_5", "temp_6"]
 
 # function connects to BMS
 def bms_connect():
-    number_tries = 0
-    while number_tries < 3:
-        try:
-            logger.debug("trying to connect %s" % bms_serial)
-            s = serial.Serial(bms_serial,timeout = 1)
-            logger.info("BMS serial connected")
-            return s, True
-        except IOError as msg:
-            logger.error(f"BMS serial error connecting: %s" % msg)
-            logger.warning(f"Waiting 5 seconds before retrying to connect ... [ Try {number_tries} ]")
-            time.sleep(5) #Waiting 5 seconds
-            number_tries += 1
-
-    raise ConnectionRefusedError
-        
+    try:
+        logger.debug("trying to connect %s" % bms_serial)
+        s = serial.Serial(bms_serial,timeout = 1)
+        logger.info("BMS serial connected")
+        return s, True
+    except IOError as msg:
+        logger.error("BMS serial error connecting: %s" % msg)
+        return False, False    
 
 # function sends data to BMS
 def bms_sendData(bms,request=''):
@@ -992,31 +982,26 @@ def random_data_debug():
 
     return (True, "***DebugMode***");
 '''
+
 # Function for BMS data collection
 def bms_data_collection():
-    global bms_connected, alive, stop_threads
+    global bms_connected, alive
 
     logger.info("Connecting to BMS...")
-    try:
-        bms, bms_connected = bms_connect()
-    except ConnectionRefusedError:
-        logger.error("Connection to BMS failed. Ending program.")
-        stop_threads = True  # Signal to stop all threads
-        return  # Exit the function to stop the thread
+    bms,bms_connected = bms_connect()
 
     success, data = bms_getVersion(bms)
     if success != True:
         logger.warning("Error retrieving BMS version number")
 
     time.sleep(0.1)
-    success, bms_sn, pack_sn = bms_getSerial(bms)
+    success, bms_sn,pack_sn = bms_getSerial(bms)
 
     if success != True:
         logger.error("Error retrieving BMS and pack serial numbers. Exiting...")
-        stop_threads = True  # Signal to stop all threads
-        return  # Exit the function to stop the thread
+        raise ConnectionError
 
-    while not stop_threads:  # Check global stop flag
+    while True:
         if bms_connected:
             try:
                 # Collect BMS data
@@ -1025,23 +1010,24 @@ def bms_data_collection():
                     logger.error(f"Error retrieving BMS analog data: {data}")
 
                 time.sleep(scan_interval / 3)
-
+                
                 success, data = bms_getPackCapacity(bms)
                 if not success:
                     logger.error(f"Error retrieving BMS pack capacity: {data}")
 
                 time.sleep(scan_interval / 3)
-
+                
                 success, data = bms_getWarnInfo(bms)
                 if not success:
                     logger.error(f"Error retrieving BMS warning info: {data}")
-
+                
                 # Collect Speed data and alive data
-                speed_km_h = inter_process_comm_module.read_speed_km_h()  # read speed_km_h
+                speed_km_h = inter_process_comm_module.read_speed_km_h() # read speed_km_h
                 telemetry_module.set_telemetry("speed_km_h", speed_km_h)
-                alive = not alive  # toggle alive variable
+                alive = not alive # toggle alive variable
                 telemetry_module.set_telemetry("alive", alive)
-
+                
+                #print(f"Telemetry prepared: {telemetry_module.telemetry}")
                 time.sleep(scan_interval / 3)
 
             except Exception as e:
@@ -1051,23 +1037,15 @@ def bms_data_collection():
         else:
             # Attempt to reconnect
             logger.info("BMS disconnected, trying to reconnect...")
-            try:
-                bms, bms_connected = bms_connect(config['bms_ip'], config['bms_port'])
-            except ConnectionRefusedError:
-                logger.error("Reconnection failed. Ending program.")
-                stop_threads = True  # Signal to stop all threads
-                return  # Exit the function to stop the thread
+            bms, bms_connected = bms_connect(config['bms_ip'], config['bms_port'])
             time.sleep(5)
 
 # Function for ThingsBoard server communication
 def tb_communication():
-    global bms_connected, stop_threads
     server_module.TB_server_connect()
 
-    while not stop_threads:  # Check global stop flag
+    while True:
         try:
-            if not bms_connected:
-                continue
             if telemetry_module.telemetry:
                 server_module.send_telemetry(telemetry_module.telemetry)
 
@@ -1083,18 +1061,20 @@ if __name__ == "__main__":
     # Start BMS data collection thread
     bms_thread = threading.Thread(target=bms_data_collection, daemon=True)
     bms_thread.start()
+
     # Start ThingsBoard communication thread
     tb_thread = threading.Thread(target=tb_communication, daemon=True)
     tb_thread.start()
 
     # Keep the main thread alive to listen for interrupts
     try:
-        while not stop_threads:
+        while True:
             time.sleep(1)  # Keep main thread alive
+
     except KeyboardInterrupt:
         logger.info("Program terminated by user.")
-        stop_threads = True  # Signal to stop all threads
     finally:
         server_module.cleanup()  # Ensure the ThingsBoard connection is properly closed
         logger.info("Program ended.")
         print("END: " + datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+
